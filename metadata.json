@@ -1,0 +1,5 @@
+{
+  "name": "Excel編集アプリ：A1プロンプト：HTML",
+  "description": "ブラウザ上で動作するPythonを使用して、スプレッドシートのA1セルにある指示を実行するAI搭載のExcel自動化ツールです。",
+  "requestFramePermissions": []
+}
