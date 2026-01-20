@@ -1,3 +1,4 @@
+
 import React, { useState, useEffect, useRef } from 'react';
 import { Upload, FileSpreadsheet, Download, RefreshCw, Play, AlertCircle, FileText, BookOpen, Zap } from 'lucide-react';
 import { AppStatus, LogEntry } from './types';
@@ -5,8 +6,8 @@ import { initPyodide, extractA1AndColumns, runPythonTransformation } from './ser
 import { generateExcelEditCode } from './services/geminiService';
 import { Terminal } from './components/Terminal';
 
-const MAX_DAILY_USES = 5;
-const STORAGE_KEY = 'excel_autopilot_usage';
+const MAX_DAILY_USES = 20; // Increased daily limit as Flash is cheaper/faster
+const STORAGE_KEY = 'excel_autopilot_usage_v3';
 
 const App: React.FC = () => {
   const [status, setStatus] = useState<AppStatus>(AppStatus.IDLE);
@@ -23,7 +24,6 @@ const App: React.FC = () => {
     setLogs(prev => [...prev, { timestamp: new Date(), message, type }]);
   };
 
-  // Initial boot
   useEffect(() => {
     const boot = async () => {
       try {
@@ -34,14 +34,13 @@ const App: React.FC = () => {
         addLog("システム準備完了。Excelファイルをアップロードしてください。", 'success');
       } catch (e: any) {
         setStatus(AppStatus.ERROR);
-        setErrorMsg("Python環境のロードに失敗しました。");
+        setErrorMsg("Python環境のロードに失敗しました。ページをリロードしてください。");
         addLog(`重大なエラー: ${e.message}`, 'error');
       }
     };
     boot();
   }, []);
 
-  // Load usage limit
   useEffect(() => {
     const today = new Date().toDateString();
     try {
@@ -51,7 +50,6 @@ const App: React.FC = () => {
         if (date === today) {
           setRemainingUses(Math.max(0, MAX_DAILY_USES - count));
         } else {
-          // Reset for new day
           localStorage.setItem(STORAGE_KEY, JSON.stringify({ date: today, count: 0 }));
           setRemainingUses(MAX_DAILY_USES);
         }
@@ -60,7 +58,6 @@ const App: React.FC = () => {
         setRemainingUses(MAX_DAILY_USES);
       }
     } catch (e) {
-      console.error("Failed to parse usage logs", e);
       setRemainingUses(MAX_DAILY_USES);
     }
   }, []);
@@ -81,7 +78,7 @@ const App: React.FC = () => {
 
   const processFile = async (file: File) => {
     if (remainingUses <= 0) {
-      setErrorMsg("本日の無料生成回数の上限に達しました。また明日お試しください。");
+      setErrorMsg("本日の生成回数の上限に達しました。明日またお試しください。");
       setStatus(AppStatus.ERROR);
       return;
     }
@@ -92,7 +89,6 @@ const App: React.FC = () => {
     setA1Instruction("");
     setErrorMsg(null);
     
-    // Reset inputs for next time
     if (fileInputRef.current) fileInputRef.current.value = "";
 
     try {
@@ -101,47 +97,45 @@ const App: React.FC = () => {
       
       const { a1, columns } = await extractA1AndColumns(file);
       
-      if (!a1 || a1.trim() === "") {
-        addLog("警告: A1セルが空のようです。", 'warning');
-        setA1Instruction("(A1セルに指示が見つかりませんでした)");
+      if (!a1 || a1.trim() === "" || a1 === "None") {
+        addLog("警告: A1セルに指示が見つかりませんでした。", 'warning');
+        setA1Instruction("(指示なし)");
+        throw new Error("ExcelファイルのA1セルに「何をしたいか」を入力してアップロードしてください。");
       } else {
-        addLog(`A1セルの指示を検出: "${a1}"`, 'success');
+        addLog(`指示を検出: "${a1}"`, 'success');
         setA1Instruction(a1);
       }
 
-      setStatus(AppStatus.ANALYZING_INSTRUCTION);
-      
-      if (!process.env.API_KEY) {
-         addLog("APIキーが見つかりません。Geminiを利用できません。", 'error');
-         setErrorMsg("環境変数に Gemini API Key が設定されていません。");
-         setStatus(AppStatus.ERROR);
-         return;
-      }
-
-      addLog("Gemini AI にコンテキストを送信中...", 'info');
-      
-      // Deduct usage before calling AI
+      setStatus(AppStatus.GENERATING_CODE);
+      addLog("Gemini 3 Flash に指示を送信中...", 'info');
       consumeUsage();
 
       const code = await generateExcelEditCode(a1, columns);
-      
       setGeneratedCode(code);
-      addLog("Pythonコードが正常に生成されました。", 'success');
+      addLog("Pythonコードが生成されました。", 'success');
       
       setStatus(AppStatus.EXECUTING_CODE);
-      addLog("ブラウザ内のサンドボックスでコードを実行中...", 'info');
+      addLog("Pythonスクリプトを実行中...", 'info');
       
       const resultBlob = await runPythonTransformation(code, file, (msg) => addLog(msg, 'info'));
       
       setOutputBlob(resultBlob);
       setStatus(AppStatus.COMPLETED);
-      addLog("処理完了！ファイルをダウンロードできます。", 'success');
+      addLog("すべての処理が完了しました！", 'success');
 
     } catch (e: any) {
       console.error(e);
       setStatus(AppStatus.ERROR);
-      setErrorMsg(e.message);
-      addLog(e.message, 'error');
+      // Clean up technical error messages
+      let displayError = e.message;
+      if (displayError.includes('{"error"')) {
+        try {
+          const parsed = JSON.parse(displayError.split('failed: ')[1] || displayError);
+          displayError = parsed.error.message || "不明なAPIエラーが発生しました。";
+        } catch(err) {}
+      }
+      setErrorMsg(displayError);
+      addLog(displayError, 'error');
     }
   };
 
@@ -150,7 +144,8 @@ const App: React.FC = () => {
     const url = URL.createObjectURL(outputBlob);
     const a = document.createElement('a');
     a.href = url;
-    a.download = `edited_${inputFile?.name || 'output.xlsx'}`;
+    const fileName = inputFile?.name.replace(/\.[^/.]+$/, "") || "output";
+    a.download = `${fileName}_編集済み.xlsx`;
     document.body.appendChild(a);
     a.click();
     document.body.removeChild(a);
@@ -167,173 +162,143 @@ const App: React.FC = () => {
 
   return (
     <div className="min-h-screen bg-gray-50 flex flex-col p-4 md:p-8 font-sans">
-      
-      {/* Header */}
       <header className="max-w-6xl mx-auto w-full mb-8 flex flex-col md:flex-row items-center justify-between gap-4">
         <div className="text-center md:text-left">
           <h1 className="text-3xl font-bold text-emerald-700 flex items-center gap-3 justify-center md:justify-start">
             <FileSpreadsheet className="w-10 h-10" />
-            Excel自動編集パイロット
+            Excel Auto-Pilot
           </h1>
-          <p className="text-gray-500 mt-1">AI搭載 Excel自動化エンジニア</p>
+          <p className="text-gray-500 mt-1">AIがExcelファイルを解析・編集します</p>
         </div>
         
         <div className="flex items-center gap-4">
-          {/* Usage Counter Badge */}
           <div className="bg-white px-4 py-2 rounded-full border border-gray-200 shadow-sm flex items-center gap-2">
             <Zap className={`w-4 h-4 ${remainingUses > 0 ? 'text-amber-500' : 'text-gray-400'}`} />
             <div className="text-sm flex flex-col md:flex-row md:gap-1 leading-tight">
-              <span className="text-gray-500 font-medium">本日残り回数:</span>
+              <span className="text-gray-500 font-medium">本日残り:</span>
               <span className={`font-bold ${remainingUses > 0 ? 'text-emerald-600' : 'text-red-500'}`}>
                 {remainingUses}/{MAX_DAILY_USES}
               </span>
             </div>
           </div>
-
-          <span className={`hidden md:inline-flex items-center gap-2 px-3 py-1 rounded-full text-xs font-semibold ${
-             status === AppStatus.BOOTING_PYTHON ? 'bg-yellow-100 text-yellow-800' : 'bg-emerald-100 text-emerald-800'
-           }`}>
-             {status === AppStatus.BOOTING_PYTHON ? (
-               <>Python起動中...</>
-             ) : (
-               <>Python準備完了</>
-             )}
-           </span>
         </div>
       </header>
 
       <main className="max-w-6xl mx-auto w-full grid grid-cols-1 lg:grid-cols-2 gap-6 flex-1">
-        
-        {/* Left Column: Input & Controls */}
         <div className="flex flex-col gap-6">
-
-          {/* Guide Card */}
-          <div className="bg-blue-50 rounded-xl shadow-sm border border-blue-100 p-5">
-            <h2 className="text-base font-bold text-blue-800 mb-3 flex items-center gap-2">
-              <BookOpen className="w-5 h-5" />
-              利用ガイド
+          <div className="bg-white rounded-xl shadow-sm border border-gray-200 p-6 flex flex-col gap-4">
+            <h2 className="text-base font-bold text-gray-800 flex items-center gap-2">
+              <BookOpen className="w-5 h-5 text-emerald-600" />
+              使い方
             </h2>
-            <ol className="text-sm text-blue-900 space-y-2 list-decimal list-inside">
-              <li>Excelファイルを開き、最初のシートを選択します。</li>
-              <li><strong>A1セル</strong>に、やりたい処理（例：「C列の値を2倍にする」「空行を削除」）を入力して保存します。</li>
-              <li>下のフォームからファイルをアップロードします。</li>
-              <li>AIが指示を理解し、自動的にPythonコードを生成・実行して編集します。</li>
-            </ol>
+            <div className="grid grid-cols-1 md:grid-cols-3 gap-4 text-center">
+              <div className="p-3 bg-gray-50 rounded-lg">
+                <div className="text-emerald-600 font-bold text-xl mb-1">1</div>
+                <div className="text-xs text-gray-600">A1セルに指示を書く</div>
+              </div>
+              <div className="p-3 bg-gray-50 rounded-lg">
+                <div className="text-emerald-600 font-bold text-xl mb-1">2</div>
+                <div className="text-xs text-gray-600">ファイルをアップロード</div>
+              </div>
+              <div className="p-3 bg-gray-50 rounded-lg">
+                <div className="text-emerald-600 font-bold text-xl mb-1">3</div>
+                <div className="text-xs text-gray-600">完成版をダウンロード</div>
+              </div>
+            </div>
           </div>
           
-          {/* Upload Card */}
           <div className={`bg-white rounded-xl shadow-sm border border-gray-200 p-6 ${remainingUses <= 0 ? 'opacity-75 grayscale' : ''}`}>
             <h2 className="text-lg font-semibold text-gray-800 mb-4 flex items-center gap-2">
               <Upload className="w-5 h-5 text-emerald-600" />
-              Excelファイルをアップロード
+              ファイルをアップロード
             </h2>
-            
             <div 
-              className={`
-                border-2 border-dashed rounded-lg p-8 text-center transition-colors
-                ${remainingUses <= 0 
-                  ? 'bg-gray-100 border-gray-300 cursor-not-allowed' 
-                  : isProcessing 
-                    ? 'bg-gray-50 border-gray-300 cursor-wait' 
-                    : 'hover:bg-emerald-50 hover:border-emerald-400 border-gray-300 cursor-pointer'
-                }
-              `}
-              onClick={() => {
-                if (!isProcessing && remainingUses > 0) {
-                  fileInputRef.current?.click();
-                }
-              }}
+              className={`border-2 border-dashed rounded-lg p-10 text-center transition-all ${remainingUses <= 0 ? 'bg-gray-100 cursor-not-allowed border-gray-300' : isProcessing ? 'bg-gray-50 cursor-wait border-emerald-300' : 'hover:bg-emerald-50 hover:border-emerald-400 border-gray-300 cursor-pointer'}`}
+              onClick={() => !isProcessing && remainingUses > 0 && fileInputRef.current?.click()}
             >
-              <input 
-                type="file" 
-                ref={fileInputRef} 
-                onChange={handleFileChange} 
-                accept=".xlsx" 
-                className="hidden" 
-                disabled={isProcessing || remainingUses <= 0}
-              />
+              <input type="file" ref={fileInputRef} onChange={handleFileChange} accept=".xlsx" className="hidden" disabled={isProcessing || remainingUses <= 0} />
               {isProcessing ? (
-                <div className="flex flex-col items-center animate-pulse">
-                  <RefreshCw className="w-10 h-10 text-emerald-500 animate-spin mb-2" />
-                  <span className="text-gray-500 font-medium">処理中...</span>
+                <div className="flex flex-col items-center">
+                  <RefreshCw className="w-12 h-12 text-emerald-500 animate-spin mb-3" />
+                  <span className="text-emerald-600 font-bold">AI処理中...</span>
+                  <span className="text-xs text-gray-400 mt-2">ブラウザでPythonを実行しています</span>
                 </div>
               ) : remainingUses <= 0 ? (
                 <div className="flex flex-col items-center">
-                  <AlertCircle className="w-12 h-12 text-gray-400 mb-2" />
-                  <span className="text-gray-600 font-medium">本日の上限に達しました</span>
-                  <span className="text-xs text-gray-500 mt-1">また明日ご利用ください</span>
+                  <AlertCircle className="w-12 h-12 text-red-400 mb-2" />
+                  <span className="text-gray-600 font-medium">利用上限に達しました</span>
                 </div>
               ) : (
                 <div className="flex flex-col items-center">
-                  <FileSpreadsheet className="w-12 h-12 text-gray-400 mb-2" />
-                  <span className="text-gray-600 font-medium">クリックして .xlsx を選択</span>
-                  <span className="text-xs text-gray-400 mt-1">ブラウザ内のPythonで安全に処理されます</span>
+                  <div className="bg-emerald-100 p-4 rounded-full mb-3">
+                    <FileSpreadsheet className="w-8 h-8 text-emerald-600" />
+                  </div>
+                  <span className="text-gray-700 font-bold">クリックして Excelファイル を選択</span>
+                  <span className="text-xs text-gray-400 mt-2">対応形式: .xlsx (A1セルに指示が必要)</span>
                 </div>
               )}
             </div>
           </div>
 
-          {/* Status / A1 Display */}
           {(a1Instruction || status === AppStatus.ERROR) && (
-            <div className={`bg-white rounded-xl shadow-sm border p-6 ${status === AppStatus.ERROR ? 'border-red-200 bg-red-50' : 'border-gray-200'}`}>
+            <div className={`bg-white rounded-xl shadow-sm border p-6 animate-in fade-in duration-300 ${status === AppStatus.ERROR ? 'border-red-200 bg-red-50' : 'border-gray-200'}`}>
               <h2 className={`text-lg font-semibold mb-3 flex items-center gap-2 ${status === AppStatus.ERROR ? 'text-red-700' : 'text-gray-800'}`}>
                 {status === AppStatus.ERROR ? <AlertCircle className="w-5 h-5"/> : <FileText className="w-5 h-5 text-emerald-600" />}
-                {status === AppStatus.ERROR ? "エラーが発生しました" : "指示を検出"}
+                {status === AppStatus.ERROR ? "エラーが発生しました" : "検出された指示 (A1セル)"}
               </h2>
-              
               {status === AppStatus.ERROR ? (
-                <p className="text-red-600 bg-red-100 p-3 rounded text-sm font-mono">{errorMsg}</p>
+                <div className="text-red-600 bg-white border border-red-100 p-4 rounded text-sm font-medium shadow-sm">
+                  {errorMsg}
+                </div>
               ) : (
-                <div className="bg-amber-50 border-l-4 border-amber-400 p-4 rounded-r">
-                   <p className="text-xs font-bold text-amber-800 uppercase tracking-wide mb-1">A1セルの内容</p>
-                   <p className="text-gray-800 italic">"{a1Instruction}"</p>
+                <div className="bg-amber-50 border-l-4 border-amber-400 p-4 rounded-r shadow-inner">
+                   <p className="text-gray-800 leading-relaxed font-medium">"{a1Instruction}"</p>
                 </div>
               )}
             </div>
           )}
 
-          {/* Download Card (Only when done) */}
           {status === AppStatus.COMPLETED && (
-            <div className="bg-emerald-50 rounded-xl shadow-sm border border-emerald-200 p-6 animate-in fade-in slide-in-from-bottom-4 duration-500">
-              <h2 className="text-lg font-semibold text-emerald-800 mb-2 flex items-center gap-2">
+            <div className="bg-emerald-600 rounded-xl shadow-lg p-6 animate-in zoom-in-95 duration-500">
+              <div className="flex items-center gap-3 text-white mb-4">
+                <div className="bg-white/20 p-2 rounded-full">
+                  <Download className="w-6 h-6" />
+                </div>
+                <div>
+                  <h2 className="text-lg font-bold">処理が完了しました</h2>
+                  <p className="text-emerald-100 text-sm">編集済みのファイルをダウンロードできます</p>
+                </div>
+              </div>
+              <button onClick={handleDownload} className="w-full bg-white text-emerald-700 hover:bg-emerald-50 font-bold py-4 px-4 rounded-lg shadow-md transition-all active:scale-[0.98] flex items-center justify-center gap-2">
                 <Download className="w-5 h-5" />
-                完了
-              </h2>
-              <p className="text-sm text-emerald-700 mb-4">ファイルの処理が正常に完了しました。</p>
-              <button 
-                onClick={handleDownload}
-                className="w-full bg-emerald-600 hover:bg-emerald-700 text-white font-bold py-3 px-4 rounded-lg shadow-md transition-all active:scale-[0.98] flex items-center justify-center gap-2"
-              >
-                <Download className="w-5 h-5" />
-                編集済みファイルをダウンロード
+                ファイルをダウンロードする
               </button>
             </div>
           )}
         </div>
 
-        {/* Right Column: Code & Terminal */}
         <div className="flex flex-col gap-6 h-full min-h-[500px]">
-          
-          {/* Terminal */}
-          <Terminal logs={logs} className="flex-1 min-h-[300px]" />
-
-          {/* Code Preview (Collapsible or just small) */}
+          <Terminal logs={logs} className="flex-1 shadow-md" />
           {generatedCode && (
-            <div className="bg-slate-900 rounded-xl shadow-sm border border-slate-700 overflow-hidden flex flex-col max-h-[400px]">
-              <div className="bg-slate-800 px-4 py-2 flex items-center justify-between border-b border-slate-700">
+            <div className="bg-slate-900 rounded-xl shadow-xl border border-slate-700 overflow-hidden flex flex-col max-h-[350px]">
+              <div className="bg-slate-800 px-4 py-3 flex items-center justify-between border-b border-slate-700">
                 <span className="text-slate-300 text-xs font-mono font-bold flex items-center gap-2">
-                  <Play className="w-3 h-3 text-emerald-400" />
-                  生成コード (GENERATED_SCRIPT.PY)
+                  <Play className="w-3 h-3 text-emerald-400 fill-emerald-400" />
+                  AIが生成したPythonスクリプト
                 </span>
-                <span className="text-xs text-slate-500">Gemini 2.5 Flash</span>
+                <span className="text-[10px] bg-emerald-500/10 text-emerald-400 px-2 py-0.5 rounded border border-emerald-500/20 font-bold">Gemini 3 Flash</span>
               </div>
-              <pre className="p-4 overflow-auto text-xs font-mono text-emerald-50 scrollbar-thin flex-1">
+              <pre className="p-4 overflow-auto text-[11px] font-mono text-emerald-50/90 scrollbar-thin flex-1 bg-slate-900/50">
                 <code>{generatedCode}</code>
               </pre>
             </div>
           )}
         </div>
       </main>
+      
+      <footer className="max-w-6xl mx-auto w-full mt-8 py-6 border-t border-gray-200 text-center text-gray-400 text-xs">
+        <p>© 2024 Excel Auto-Pilot Engineer | Powered by Gemini 3 Flash & Pyodide</p>
+      </footer>
     </div>
   );
 };

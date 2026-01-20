@@ -8,17 +8,18 @@ const SYSTEM_INSTRUCTION = `
 
 **重要ルール:**
 1.  **入力ファイル**: \`input.xlsx\` を読み込んでください。
-2.  **出力ファイル**: **必ず \`output.xlsx\` という名前で保存してください。** 処理に変更がない場合や、エラーが発生しそうな場合でも、最終的にこのファイルが存在しないとシステムがエラーになります。
+2.  **出力ファイル**: **必ず \`output.xlsx\` という名前で保存してください。**
 3.  **環境**: ブラウザ内のPython環境（Pyodide）で動作します。\`pandas\`、\`openpyxl\`、\`json\` が利用可能です。
-4.  **言語**: ユーザーは日本人です。A1の指示は日本語です。
-5.  **ログ出力**: 処理の各ステップで \`print()\` を使用して進捗を報告してください。**ログメッセージは必ず日本語にしてください。**
+4.  **注意点 (重要)**: 
+    - \`openpyxl.cell.text\` から \`CellRichText\` をインポートしないでください（ImportErrorの原因になります）。
+    - データの正確性を最優先してください。
+    - 基本的に \`pandas\` を使用してデータを処理し、最後に \`output.xlsx\` へ保存してください。
+5.  **言語**: ユーザーは日本人です。指示は日本語です。ログメッセージも日本語にしてください。
 
 **生成プロセスの要件:**
 - セルA1の指示を厳密に解釈してください。
-- 指示に従ってデータを加工してください。
-- A1セル自体を削除する指示がない限り、A1セルの指示内容は残したまま（あるいは適切に更新して）保存してください。
-- 最後に必ず \`df.to_excel("output.xlsx", index=False)\` または \`wb.save("output.xlsx")\` を実行してください。
-- コードブロック (\`\`\`python ... \`\`\`) のみを出力し、解説文は含めないでください。
+- A1セル自体の指示内容は、特に削除の指示がない限り、そのまま残すか、データ行として扱わないように注意してください。
+- 最後に必ず \`output.xlsx\` を生成するコードを含めてください。
 
 **コードの構成例:**
 \`\`\`python
@@ -26,16 +27,20 @@ import pandas as pd
 import openpyxl
 
 try:
-    print("ファイルを読み込んでいます...")
-    # 処理ロジック
-    print("データを加工しています...")
-    # 加工ロジック
-    print("結果を output.xlsx に保存しています...")
-    # 保存処理（必ず実行）
-    print("処理が正常に完了しました。")
+    print("データを読み込んでいます...")
+    df = pd.read_excel("input.xlsx")
+    
+    print("指示に従って加工を実行中...")
+    # ロジックを記述
+    
+    print("結果を保存中...")
+    df.to_excel("output.xlsx", index=False)
+    print("完了しました。")
 except Exception as e:
-    print(f"エラーが発生しました: {e}")
-    # 失敗しても元のファイルをコピーして保存するなどの配慮
+    print(f"エラー: {e}")
+    # 失敗時でもファイルを生成するフォールバック
+    import shutil
+    shutil.copy("input.xlsx", "output.xlsx")
 \`\`\`
 `;
 
@@ -45,40 +50,39 @@ export const generateExcelEditCode = async (
 ): Promise<string> => {
   const apiKey = process.env.API_KEY;
   if (!apiKey) {
-    throw new Error("API Key is missing.");
+    throw new Error("APIキーが設定されていません。Vercelの環境変数を確認してください。");
   }
 
-  // Use gemini-3-pro-preview for high-quality code generation
+  // Use gemini-3-flash-preview as it has better quota availability for free tier while remaining highly capable
   const ai = new GoogleGenAI({ apiKey });
 
   const prompt = `
-    ユーザーがExcelファイルをアップロードしました。
+    Excelファイルの自動編集用スクリプトを作成してください。
     
-    **セルA1の指示内容:** "${a1Instruction}"
+    **指示内容 (A1セル):** "${a1Instruction}"
+    **現在の列構成:** ${columns.join(', ')}
     
-    **シートの列構成:** ${columns.join(', ')}
+    **要件:**
+    - 'input.xlsx' を読み込み、指示通りに加工して 'output.xlsx' に保存する。
+    - 'openpyxl.cell.text' からの 'CellRichText' インポートは避けること。
+    - 進捗を日本語で print 出力すること。
     
-    この指示を実行するためのPythonスクリプトを生成してください。
-    入力ファイル: 'input.xlsx'
-    出力ファイル: 'output.xlsx' (必ずこの名前で生成してください)
-    
-    \`\`\`python ... \`\`\` の形式で有効なPythonコードのみを返してください。
+    Pythonコードのみを \`\`\`python ... \`\`\` 形式で出力してください。
   `;
 
   try {
     const response = await ai.models.generateContent({
-      model: 'gemini-3-pro-preview',
+      model: 'gemini-3-flash-preview',
       contents: prompt,
       config: {
         systemInstruction: SYSTEM_INSTRUCTION,
-        temperature: 0.1, // より決定論的で正確なコードのために低い温度設定
+        temperature: 0.1,
       }
     });
 
     const text = response.text;
-    if (!text) throw new Error("Geminiからの応答が空です。");
+    if (!text) throw new Error("AIからの応答が空です。");
 
-    // Extract code block
     const codeMatch = text.match(/```python([\s\S]*?)```/);
     if (codeMatch && codeMatch[1]) {
       return codeMatch[1].trim();
@@ -88,6 +92,12 @@ export const generateExcelEditCode = async (
 
   } catch (error: any) {
     console.error("Gemini API Error:", error);
+    
+    // Check for quota exceeded error
+    if (error.message?.includes("429") || error.message?.includes("RESOURCE_EXHAUSTED")) {
+      throw new Error("APIの利用制限(Quota)を超過しました。しばらく時間を置いてから再度お試しください。");
+    }
+    
     throw new Error(`コード生成に失敗しました: ${error.message}`);
   }
 };
