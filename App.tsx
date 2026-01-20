@@ -6,7 +6,7 @@ import { initPyodide, extractA1AndColumns, runPythonTransformation } from './ser
 import { generateExcelEditCode } from './services/geminiService';
 import { Terminal } from './components/Terminal';
 
-const MAX_DAILY_USES = 20; // Increased daily limit as Flash is cheaper/faster
+const MAX_DAILY_USES = 20; 
 const STORAGE_KEY = 'excel_autopilot_usage_v3';
 
 const App: React.FC = () => {
@@ -110,7 +110,9 @@ const App: React.FC = () => {
       addLog("Gemini 3 Flash に指示を送信中...", 'info');
       consumeUsage();
 
-      const code = await generateExcelEditCode(a1, columns);
+      const code = await generateExcelEditCode(a1, columns, (attempt, msg) => {
+        addLog(msg, 'warning');
+      });
       setGeneratedCode(code);
       addLog("Pythonコードが生成されました。", 'success');
       
@@ -126,11 +128,11 @@ const App: React.FC = () => {
     } catch (e: any) {
       console.error(e);
       setStatus(AppStatus.ERROR);
-      // Clean up technical error messages
       let displayError = e.message;
       if (displayError.includes('{"error"')) {
         try {
-          const parsed = JSON.parse(displayError.split('failed: ')[1] || displayError);
+          const part = displayError.includes('failed: ') ? displayError.split('failed: ')[1] : displayError;
+          const parsed = JSON.parse(part);
           displayError = parsed.error.message || "不明なAPIエラーが発生しました。";
         } catch(err) {}
       }

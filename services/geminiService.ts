@@ -11,7 +11,7 @@ const SYSTEM_INSTRUCTION = `
 2.  **出力ファイル**: **必ず \`output.xlsx\` という名前で保存してください。**
 3.  **環境**: ブラウザ内のPython環境（Pyodide）で動作します。\`pandas\`、\`openpyxl\`、\`json\` が利用可能です。
 4.  **注意点 (重要)**: 
-    - \`openpyxl.cell.text\` から \`CellRichText\` をインポートしないでください（ImportErrorの原因になります）。
+    - \`openpyxl.cell.text\` から \`CellRichText\` をインポートしないでください。
     - データの正確性を最優先してください。
     - 基本的に \`pandas\` を使用してデータを処理し、最後に \`output.xlsx\` へ保存してください。
 5.  **言語**: ユーザーは日本人です。指示は日本語です。ログメッセージも日本語にしてください。
@@ -20,41 +20,22 @@ const SYSTEM_INSTRUCTION = `
 - セルA1の指示を厳密に解釈してください。
 - A1セル自体の指示内容は、特に削除の指示がない限り、そのまま残すか、データ行として扱わないように注意してください。
 - 最後に必ず \`output.xlsx\` を生成するコードを含めてください。
-
-**コードの構成例:**
-\`\`\`python
-import pandas as pd
-import openpyxl
-
-try:
-    print("データを読み込んでいます...")
-    df = pd.read_excel("input.xlsx")
-    
-    print("指示に従って加工を実行中...")
-    # ロジックを記述
-    
-    print("結果を保存中...")
-    df.to_excel("output.xlsx", index=False)
-    print("完了しました。")
-except Exception as e:
-    print(f"エラー: {e}")
-    # 失敗時でもファイルを生成するフォールバック
-    import shutil
-    shutil.copy("input.xlsx", "output.xlsx")
-\`\`\`
 `;
+
+const delay = (ms: number) => new Promise(res => setTimeout(res, ms));
 
 export const generateExcelEditCode = async (
   a1Instruction: string,
-  columns: string[]
+  columns: string[],
+  onRetry?: (attempt: number, message: string) => void
 ): Promise<string> => {
   const apiKey = process.env.API_KEY;
   if (!apiKey) {
     throw new Error("APIキーが設定されていません。Vercelの環境変数を確認してください。");
   }
 
-  // Use gemini-3-flash-preview as it has better quota availability for free tier while remaining highly capable
   const ai = new GoogleGenAI({ apiKey });
+  const modelName = 'gemini-3-flash-preview';
 
   const prompt = `
     Excelファイルの自動編集用スクリプトを作成してください。
@@ -70,34 +51,55 @@ export const generateExcelEditCode = async (
     Pythonコードのみを \`\`\`python ... \`\`\` 形式で出力してください。
   `;
 
-  try {
-    const response = await ai.models.generateContent({
-      model: 'gemini-3-flash-preview',
-      contents: prompt,
-      config: {
-        systemInstruction: SYSTEM_INSTRUCTION,
-        temperature: 0.1,
+  let lastError: any;
+  const maxRetries = 3;
+  
+  for (let attempt = 0; attempt <= maxRetries; attempt++) {
+    try {
+      const response = await ai.models.generateContent({
+        model: modelName,
+        contents: prompt,
+        config: {
+          systemInstruction: SYSTEM_INSTRUCTION,
+          temperature: 0.1,
+        }
+      });
+
+      const text = response.text;
+      if (!text) throw new Error("AIからの応答が空です。");
+
+      const codeMatch = text.match(/```python([\s\S]*?)```/);
+      if (codeMatch && codeMatch[1]) {
+        return codeMatch[1].trim();
       }
-    });
+      return text.replace(/```python/g, '').replace(/```/g, '').trim();
 
-    const text = response.text;
-    if (!text) throw new Error("AIからの応答が空です。");
-
-    const codeMatch = text.match(/```python([\s\S]*?)```/);
-    if (codeMatch && codeMatch[1]) {
-      return codeMatch[1].trim();
+    } catch (error: any) {
+      lastError = error;
+      const errorMsg = error.message || "";
+      
+      // Retry on 503 (Overloaded) or 429 (Rate Limit)
+      const isRetryable = errorMsg.includes("503") || errorMsg.includes("429") || errorMsg.includes("overloaded") || errorMsg.includes("RESOURCE_EXHAUSTED") || errorMsg.includes("UNAVAILABLE");
+      
+      if (isRetryable && attempt < maxRetries) {
+        const backoffMs = Math.pow(2, attempt) * 1000 + Math.random() * 1000;
+        onRetry?.(attempt + 1, `サーバーが混み合っています。再試行中 (${attempt + 1}/${maxRetries})...`);
+        await delay(backoffMs);
+        continue;
+      }
+      
+      break; // Not retryable or max retries reached
     }
-    
-    return text.replace(/```python/g, '').replace(/```/g, '').trim();
-
-  } catch (error: any) {
-    console.error("Gemini API Error:", error);
-    
-    // Check for quota exceeded error
-    if (error.message?.includes("429") || error.message?.includes("RESOURCE_EXHAUSTED")) {
-      throw new Error("APIの利用制限(Quota)を超過しました。しばらく時間を置いてから再度お試しください。");
-    }
-    
-    throw new Error(`コード生成に失敗しました: ${error.message}`);
   }
+
+  console.error("Gemini API Error after retries:", lastError);
+  
+  if (lastError.message?.includes("503") || lastError.message?.includes("overloaded")) {
+    throw new Error("AIサーバーが現在非常に混み合っています。少し時間をおいてから、再度「ファイルをアップロード」し直してください。");
+  }
+  if (lastError.message?.includes("429") || lastError.message?.includes("RESOURCE_EXHAUSTED")) {
+    throw new Error("APIの利用制限(Quota)を超過しました。しばらく時間を置いてから再度お試しください。");
+  }
+  
+  throw new Error(`コード生成に失敗しました: ${lastError.message}`);
 };
