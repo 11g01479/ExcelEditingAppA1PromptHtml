@@ -1,13 +1,13 @@
 
 import React, { useState, useEffect, useRef } from 'react';
-import { Upload, FileSpreadsheet, Download, RefreshCw, Play, AlertCircle, FileText, BookOpen, Zap } from 'lucide-react';
+import { Upload, FileSpreadsheet, Download, RefreshCw, Play, AlertCircle, FileText, BookOpen, Zap, RotateCcw } from 'lucide-react';
 import { AppStatus, LogEntry } from './types';
 import { initPyodide, extractA1AndColumns, runPythonTransformation } from './services/pyodideService';
 import { generateExcelEditCode } from './services/geminiService';
 import { Terminal } from './components/Terminal';
 
-const MAX_DAILY_USES = 20; 
-const STORAGE_KEY = 'excel_autopilot_usage_v3';
+const MAX_DAILY_USES = 50; 
+const STORAGE_KEY = 'excel_autopilot_usage_v5';
 
 const App: React.FC = () => {
   const [status, setStatus] = useState<AppStatus>(AppStatus.IDLE);
@@ -91,16 +91,20 @@ const App: React.FC = () => {
     
     if (fileInputRef.current) fileInputRef.current.value = "";
 
+    await startTransformation(file);
+  };
+
+  const startTransformation = async (file: File) => {
     try {
       setStatus(AppStatus.READING_FILE);
-      addLog(`ファイル読み込み中: ${file.name}...`, 'info');
+      addLog(`解析開始: ${file.name}`, 'info');
       
       const { a1, columns } = await extractA1AndColumns(file);
       
       if (!a1 || a1.trim() === "" || a1 === "None") {
         addLog("警告: A1セルに指示が見つかりませんでした。", 'warning');
         setA1Instruction("(指示なし)");
-        throw new Error("ExcelファイルのA1セルに「何をしたいか」を入力してアップロードしてください。");
+        throw new Error("ExcelファイルのA1セルに指示内容を入力してアップロードしてください。");
       } else {
         addLog(`指示を検出: "${a1}"`, 'success');
         setA1Instruction(a1);
@@ -117,7 +121,7 @@ const App: React.FC = () => {
       addLog("Pythonコードが生成されました。", 'success');
       
       setStatus(AppStatus.EXECUTING_CODE);
-      addLog("Pythonスクリプトを実行中...", 'info');
+      addLog("Pythonを実行中...", 'info');
       
       const resultBlob = await runPythonTransformation(code, file, (msg) => addLog(msg, 'info'));
       
@@ -128,16 +132,27 @@ const App: React.FC = () => {
     } catch (e: any) {
       console.error(e);
       setStatus(AppStatus.ERROR);
+      
       let displayError = e.message;
-      if (displayError.includes('{"error"')) {
+      if (typeof displayError === 'string' && displayError.includes('{"error"')) {
         try {
-          const part = displayError.includes('failed: ') ? displayError.split('failed: ')[1] : displayError;
-          const parsed = JSON.parse(part);
-          displayError = parsed.error.message || "不明なAPIエラーが発生しました。";
+          const match = displayError.match(/\{"error":.*\}/);
+          if (match) {
+            const parsed = JSON.parse(match[0]);
+            displayError = parsed.error?.message || displayError;
+          }
         } catch(err) {}
       }
+      
       setErrorMsg(displayError);
       addLog(displayError, 'error');
+    }
+  };
+
+  const handleRetry = () => {
+    if (inputFile) {
+      setErrorMsg(null);
+      startTransformation(inputFile);
     }
   };
 
@@ -161,6 +176,8 @@ const App: React.FC = () => {
     AppStatus.GENERATING_CODE, 
     AppStatus.EXECUTING_CODE
   ].includes(status);
+
+  const isOverloadError = errorMsg?.includes("混み合っています") || errorMsg?.includes("制限") || errorMsg?.includes("503") || errorMsg?.includes("429");
 
   return (
     <div className="min-h-screen bg-gray-50 flex flex-col p-4 md:p-8 font-sans">
@@ -200,11 +217,11 @@ const App: React.FC = () => {
               </div>
               <div className="p-3 bg-gray-50 rounded-lg">
                 <div className="text-emerald-600 font-bold text-xl mb-1">2</div>
-                <div className="text-xs text-gray-600">ファイルをアップロード</div>
+                <div className="text-xs text-gray-600">Excelをアップロード</div>
               </div>
               <div className="p-3 bg-gray-50 rounded-lg">
                 <div className="text-emerald-600 font-bold text-xl mb-1">3</div>
-                <div className="text-xs text-gray-600">完成版をダウンロード</div>
+                <div className="text-xs text-gray-600">結果をダウンロード</div>
               </div>
             </div>
           </div>
@@ -223,7 +240,7 @@ const App: React.FC = () => {
                 <div className="flex flex-col items-center">
                   <RefreshCw className="w-12 h-12 text-emerald-500 animate-spin mb-3" />
                   <span className="text-emerald-600 font-bold">AI処理中...</span>
-                  <span className="text-xs text-gray-400 mt-2">ブラウザでPythonを実行しています</span>
+                  <span className="text-xs text-gray-400 mt-2">サーバーの負荷状況により時間がかかる場合があります</span>
                 </div>
               ) : remainingUses <= 0 ? (
                 <div className="flex flex-col items-center">
@@ -236,7 +253,7 @@ const App: React.FC = () => {
                     <FileSpreadsheet className="w-8 h-8 text-emerald-600" />
                   </div>
                   <span className="text-gray-700 font-bold">クリックして Excelファイル を選択</span>
-                  <span className="text-xs text-gray-400 mt-2">対応形式: .xlsx (A1セルに指示が必要)</span>
+                  <span className="text-xs text-gray-400 mt-2">対応形式: .xlsx (A1セルに日本語の指示を入力してください)</span>
                 </div>
               )}
             </div>
@@ -246,15 +263,26 @@ const App: React.FC = () => {
             <div className={`bg-white rounded-xl shadow-sm border p-6 animate-in fade-in duration-300 ${status === AppStatus.ERROR ? 'border-red-200 bg-red-50' : 'border-gray-200'}`}>
               <h2 className={`text-lg font-semibold mb-3 flex items-center gap-2 ${status === AppStatus.ERROR ? 'text-red-700' : 'text-gray-800'}`}>
                 {status === AppStatus.ERROR ? <AlertCircle className="w-5 h-5"/> : <FileText className="w-5 h-5 text-emerald-600" />}
-                {status === AppStatus.ERROR ? "エラーが発生しました" : "検出された指示 (A1セル)"}
+                {status === AppStatus.ERROR ? "エラーが発生しました" : "検出された指示"}
               </h2>
               {status === AppStatus.ERROR ? (
-                <div className="text-red-600 bg-white border border-red-100 p-4 rounded text-sm font-medium shadow-sm">
-                  {errorMsg}
+                <div className="flex flex-col gap-4">
+                  <div className="text-red-600 bg-white border border-red-100 p-4 rounded text-sm font-medium shadow-sm leading-relaxed">
+                    {errorMsg}
+                  </div>
+                  {isOverloadError && inputFile && (
+                    <button 
+                      onClick={handleRetry} 
+                      className="flex items-center justify-center gap-2 bg-red-600 hover:bg-red-700 text-white font-bold py-3 px-4 rounded-lg shadow transition-all active:scale-[0.98]"
+                    >
+                      <RotateCcw className="w-5 h-5" />
+                      再試行する
+                    </button>
+                  )}
                 </div>
               ) : (
                 <div className="bg-amber-50 border-l-4 border-amber-400 p-4 rounded-r shadow-inner">
-                   <p className="text-gray-800 leading-relaxed font-medium">"{a1Instruction}"</p>
+                   <p className="text-gray-800 leading-relaxed font-medium italic">"{a1Instruction}"</p>
                 </div>
               )}
             </div>
@@ -267,13 +295,13 @@ const App: React.FC = () => {
                   <Download className="w-6 h-6" />
                 </div>
                 <div>
-                  <h2 className="text-lg font-bold">処理が完了しました</h2>
-                  <p className="text-emerald-100 text-sm">編集済みのファイルをダウンロードできます</p>
+                  <h2 className="text-lg font-bold">編集が完了しました</h2>
+                  <p className="text-emerald-100 text-sm">下記ボタンから保存してください</p>
                 </div>
               </div>
               <button onClick={handleDownload} className="w-full bg-white text-emerald-700 hover:bg-emerald-50 font-bold py-4 px-4 rounded-lg shadow-md transition-all active:scale-[0.98] flex items-center justify-center gap-2">
                 <Download className="w-5 h-5" />
-                ファイルをダウンロードする
+                ファイルをダウンロード
               </button>
             </div>
           )}
@@ -286,7 +314,7 @@ const App: React.FC = () => {
               <div className="bg-slate-800 px-4 py-3 flex items-center justify-between border-b border-slate-700">
                 <span className="text-slate-300 text-xs font-mono font-bold flex items-center gap-2">
                   <Play className="w-3 h-3 text-emerald-400 fill-emerald-400" />
-                  AIが生成したPythonスクリプト
+                  生成コード
                 </span>
                 <span className="text-[10px] bg-emerald-500/10 text-emerald-400 px-2 py-0.5 rounded border border-emerald-500/20 font-bold">Gemini 3 Flash</span>
               </div>

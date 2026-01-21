@@ -18,7 +18,7 @@ const SYSTEM_INSTRUCTION = `
 
 **生成プロセスの要件:**
 - セルA1の指示を厳密に解釈してください。
-- A1セル自体の指示内容は、特に削除の指示がない限り、そのまま残すか、データ行として扱わないように注意してください。
+- A1セル自体の指示内容は、そのまま残すか、データ行として扱わないように注意してください。
 - 最後に必ず \`output.xlsx\` を生成するコードを含めてください。
 `;
 
@@ -34,6 +34,7 @@ export const generateExcelEditCode = async (
     throw new Error("APIキーが設定されていません。Vercelの環境変数を確認してください。");
   }
 
+  // Create instance right before use as per best practices
   const ai = new GoogleGenAI({ apiKey });
   const modelName = 'gemini-3-flash-preview';
 
@@ -52,7 +53,7 @@ export const generateExcelEditCode = async (
   `;
 
   let lastError: any;
-  const maxRetries = 3;
+  const maxRetries = 8; // Increased retries for sustained overload
   
   for (let attempt = 0; attempt <= maxRetries; attempt++) {
     try {
@@ -76,30 +77,54 @@ export const generateExcelEditCode = async (
 
     } catch (error: any) {
       lastError = error;
-      const errorMsg = error.message || "";
       
-      // Retry on 503 (Overloaded) or 429 (Rate Limit)
-      const isRetryable = errorMsg.includes("503") || errorMsg.includes("429") || errorMsg.includes("overloaded") || errorMsg.includes("RESOURCE_EXHAUSTED") || errorMsg.includes("UNAVAILABLE");
+      // Attempt to extract structured error data
+      const status = error.status || (error.response && error.response.status);
+      const code = error.code || (error.response && error.response.code);
+      const errorMsg = error.message || (typeof error === 'string' ? error : JSON.stringify(error));
+      
+      const isRetryable = 
+        status === "UNAVAILABLE" || 
+        status === "RESOURCE_EXHAUSTED" ||
+        String(code) === "503" ||
+        String(code) === "429" ||
+        errorMsg.includes("503") ||
+        errorMsg.includes("429") ||
+        errorMsg.toLowerCase().includes("overloaded") ||
+        errorMsg.toLowerCase().includes("unavailable") ||
+        errorMsg.toLowerCase().includes("resource_exhausted");
       
       if (isRetryable && attempt < maxRetries) {
-        const backoffMs = Math.pow(2, attempt) * 1000 + Math.random() * 1000;
-        onRetry?.(attempt + 1, `サーバーが混み合っています。再試行中 (${attempt + 1}/${maxRetries})...`);
+        // Exponential backoff with jitter: (2^attempt * 1.5s) + random(0-1s)
+        const backoffMs = Math.pow(1.8, attempt) * 1500 + Math.random() * 1000;
+        onRetry?.(attempt + 1, `AIサーバーが混雑しています。再試行中 (${attempt + 1}/${maxRetries})...`);
         await delay(backoffMs);
         continue;
       }
       
-      break; // Not retryable or max retries reached
+      break; 
     }
   }
 
-  console.error("Gemini API Error after retries:", lastError);
-  
-  if (lastError.message?.includes("503") || lastError.message?.includes("overloaded")) {
-    throw new Error("AIサーバーが現在非常に混み合っています。少し時間をおいてから、再度「ファイルをアップロード」し直してください。");
+  // Final error handling with clean messages
+  let finalMessage = lastError.message || "不明なエラーが発生しました。";
+  if (finalMessage.includes('{"error"')) {
+    try {
+      const match = finalMessage.match(/\{"error":.*\}/);
+      if (match) {
+        const parsed = JSON.parse(match[0]);
+        finalMessage = parsed.error?.message || finalMessage;
+      }
+    } catch(e) {}
   }
-  if (lastError.message?.includes("429") || lastError.message?.includes("RESOURCE_EXHAUSTED")) {
-    throw new Error("APIの利用制限(Quota)を超過しました。しばらく時間を置いてから再度お試しください。");
+
+  if (finalMessage.toLowerCase().includes("overloaded") || finalMessage.includes("503") || finalMessage.includes("UNAVAILABLE")) {
+    throw new Error("AIサーバーが現在非常に混み合っています。Google側の無料枠制限により発生しています。1〜2分待ってから、下の「再試行」ボタンを押してください。");
   }
   
-  throw new Error(`コード生成に失敗しました: ${lastError.message}`);
+  if (finalMessage.includes("429") || finalMessage.includes("RESOURCE_EXHAUSTED")) {
+    throw new Error("APIの利用制限(Quota)に達しました。しばらく時間を置いてから再度お試しください。");
+  }
+  
+  throw new Error(`エラー: ${finalMessage}`);
 };
