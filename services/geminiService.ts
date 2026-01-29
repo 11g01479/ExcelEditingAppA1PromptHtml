@@ -14,6 +14,7 @@ const SYSTEM_INSTRUCTION = `
     - \`openpyxl.cell.text\` から \`CellRichText\` をインポートしないでください。
     - データの正確性を最優先してください。
     - 基本的に \`pandas\` を使用してデータを処理し、最後に \`output.xlsx\` へ保存してください。
+    - **読み取ったセルの値が空であった場合（NaNやNone）、書き込みや貼り付けの際には空欄（"" または None）として適切に扱ってください。**
 5.  **言語**: ユーザーは日本人です。指示は日本語です。ログメッセージも日本語にしてください。
 
 **生成プロセスの要件:**
@@ -34,7 +35,7 @@ export const generateExcelEditCode = async (
     throw new Error("APIキーが設定されていません。Vercelの環境変数を確認してください。");
   }
 
-  // Create instance right before use as per best practices
+  // Create instance right before use to ensure fresh config
   const ai = new GoogleGenAI({ apiKey });
   const modelName = 'gemini-3-flash-preview';
 
@@ -53,7 +54,7 @@ export const generateExcelEditCode = async (
   `;
 
   let lastError: any;
-  const maxRetries = 8; // Increased retries for sustained overload
+  const maxRetries = 8; 
   
   for (let attempt = 0; attempt <= maxRetries; attempt++) {
     try {
@@ -78,26 +79,24 @@ export const generateExcelEditCode = async (
     } catch (error: any) {
       lastError = error;
       
-      // Attempt to extract structured error data
-      const status = error.status || (error.response && error.response.status);
-      const code = error.code || (error.response && error.response.code);
-      const errorMsg = error.message || (typeof error === 'string' ? error : JSON.stringify(error));
+      const errorMsg = error.message || (typeof error === 'string' ? error : "");
+      const errorStr = JSON.stringify(error);
       
+      // Check for retryable errors (503, 429, Rpc/XHR failures)
       const isRetryable = 
-        status === "UNAVAILABLE" || 
-        status === "RESOURCE_EXHAUSTED" ||
-        String(code) === "503" ||
-        String(code) === "429" ||
-        errorMsg.includes("503") ||
-        errorMsg.includes("429") ||
-        errorMsg.toLowerCase().includes("overloaded") ||
-        errorMsg.toLowerCase().includes("unavailable") ||
-        errorMsg.toLowerCase().includes("resource_exhausted");
+        errorMsg.includes("503") || 
+        errorMsg.includes("429") || 
+        errorMsg.includes("overloaded") || 
+        errorMsg.includes("RESOURCE_EXHAUSTED") || 
+        errorMsg.includes("UNAVAILABLE") ||
+        errorMsg.includes("Rpc failed") || 
+        errorMsg.includes("xhr error") ||
+        errorStr.includes("alkalimakersuite");
       
       if (isRetryable && attempt < maxRetries) {
-        // Exponential backoff with jitter: (2^attempt * 1.5s) + random(0-1s)
         const backoffMs = Math.pow(1.8, attempt) * 1500 + Math.random() * 1000;
-        onRetry?.(attempt + 1, `AIサーバーが混雑しています。再試行中 (${attempt + 1}/${maxRetries})...`);
+        const statusText = errorMsg.includes("Rpc failed") ? "通信エラー" : "サーバー混雑";
+        onRetry?.(attempt + 1, `${statusText}が発生しました。再試行しています (${attempt + 1}/${maxRetries})...`);
         await delay(backoffMs);
         continue;
       }
@@ -106,8 +105,14 @@ export const generateExcelEditCode = async (
     }
   }
 
-  // Final error handling with clean messages
+  // Refine the final error message for the UI
   let finalMessage = lastError.message || "不明なエラーが発生しました。";
+  
+  // Detection of specific Rpc/Proxy errors
+  if (finalMessage.includes("Rpc failed") || finalMessage.includes("xhr error") || JSON.stringify(lastError).includes("alkalimakersuite")) {
+    throw new Error("ネットワーク通信エラーが発生しました（Rpc/XHR failure）。ブラウザの広告ブロック機能が干渉しているか、一時的な接続の問題である可能性があります。ページを更新するか、少し待ってから「再試行」してください。");
+  }
+
   if (finalMessage.includes('{"error"')) {
     try {
       const match = finalMessage.match(/\{"error":.*\}/);
@@ -119,11 +124,11 @@ export const generateExcelEditCode = async (
   }
 
   if (finalMessage.toLowerCase().includes("overloaded") || finalMessage.includes("503") || finalMessage.includes("UNAVAILABLE")) {
-    throw new Error("AIサーバーが現在非常に混み合っています。Google側の無料枠制限により発生しています。1〜2分待ってから、下の「再試行」ボタンを押してください。");
+    throw new Error("AIサーバーが非常に混み合っており、再試行も失敗しました。1〜2分待機してから、下の「再試行」ボタンを押してください。");
   }
   
   if (finalMessage.includes("429") || finalMessage.includes("RESOURCE_EXHAUSTED")) {
-    throw new Error("APIの利用制限(Quota)に達しました。しばらく時間を置いてから再度お試しください。");
+    throw new Error("API of the usage limit (Quota) has been reached. This is due to the free tier limitations. Please wait a while and try again.");
   }
   
   throw new Error(`エラー: ${finalMessage}`);

@@ -152,6 +152,7 @@ const App: React.FC = () => {
   const handleRetry = () => {
     if (inputFile) {
       setErrorMsg(null);
+      addLog("処理を再試行しています...", 'info');
       startTransformation(inputFile);
     }
   };
@@ -177,7 +178,14 @@ const App: React.FC = () => {
     AppStatus.EXECUTING_CODE
   ].includes(status);
 
-  const isOverloadError = errorMsg?.includes("混み合っています") || errorMsg?.includes("制限") || errorMsg?.includes("503") || errorMsg?.includes("429");
+  // Expanded overload detection to include networking/rpc errors for manual retry trigger
+  const isRetryableError = errorMsg?.includes("混み合っています") || 
+                          errorMsg?.includes("制限") || 
+                          errorMsg?.includes("503") || 
+                          errorMsg?.includes("429") || 
+                          errorMsg?.includes("Rpc") || 
+                          errorMsg?.includes("xhr") ||
+                          errorMsg?.includes("通信エラー");
 
   return (
     <div className="min-h-screen bg-gray-50 flex flex-col p-4 md:p-8 font-sans">
@@ -240,7 +248,9 @@ const App: React.FC = () => {
                 <div className="flex flex-col items-center">
                   <RefreshCw className="w-12 h-12 text-emerald-500 animate-spin mb-3" />
                   <span className="text-emerald-600 font-bold">AI処理中...</span>
-                  <span className="text-xs text-gray-400 mt-2">サーバーの負荷状況により時間がかかる場合があります</span>
+                  <span className="text-xs text-gray-400 mt-2 text-center max-w-[250px]">
+                    サーバーの負荷状況により時間がかかる場合があります。しばらくお待ちください。
+                  </span>
                 </div>
               ) : remainingUses <= 0 ? (
                 <div className="flex flex-col items-center">
@@ -270,7 +280,7 @@ const App: React.FC = () => {
                   <div className="text-red-600 bg-white border border-red-100 p-4 rounded text-sm font-medium shadow-sm leading-relaxed">
                     {errorMsg}
                   </div>
-                  {isOverloadError && inputFile && (
+                  {isRetryableError && inputFile && (
                     <button 
                       onClick={handleRetry} 
                       className="flex items-center justify-center gap-2 bg-red-600 hover:bg-red-700 text-white font-bold py-3 px-4 rounded-lg shadow transition-all active:scale-[0.98]"
